@@ -127,11 +127,24 @@ def main() -> None:
     elapsed = time.time() - t0
     print(f"  Done in {elapsed:.1f}s")
     print(f"  Result: {type(outcome).__name__}")
+
+    # If the job failed, print WHICH stage and WHY, then show stage statuses.
+    if type(outcome).__name__ == "JobFailed":
+        print(f"  FAILED at stage : {outcome.failingStage.name}")
+        print(f"  Reason          : {outcome.reason}")
+        if getattr(outcome, "unstoredChunkIds", None):
+            print(f"  Unstored chunks : {len(outcome.unstoredChunkIds)}")
+        print("\n  Stage statuses:")
+        status = pipeline.status(job_id)
+        for stage, st in status.stageStatuses.items():
+            print(f"    {stage.name:<14} {st.name}")
+        sys.exit(1)
+
     stored = getattr(outcome, "storedChunkIds", [])
     print(f"  Chunks stored: {len(stored)}")
 
     if not stored:
-        print("No chunks stored. Processing may have failed.")
+        print("No chunks stored (document may have produced no extractable text).")
         sys.exit(1)
 
     # Interactive query loop
