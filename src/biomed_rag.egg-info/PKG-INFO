@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: biomed-rag
+Version: 0.1.0
+Summary: End-to-end Retrieval-Augmented Generation pipeline for biomedical engineering content
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: hypothesis>=6.100; extra == "dev"
