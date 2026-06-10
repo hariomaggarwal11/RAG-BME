@@ -101,7 +101,11 @@ class SentenceTransformerModel(EmbeddingModel):
         self._model_name = model_name
         self._model_id = model_id
         self._model = SentenceTransformer(model_name)
-        self._dimension = self._model.get_sentence_embedding_dimension()
+        # Method was renamed across sentence-transformers versions; support both.
+        if hasattr(self._model, "get_embedding_dimension"):
+            self._dimension = self._model.get_embedding_dimension()
+        else:
+            self._dimension = self._model.get_sentence_embedding_dimension()
 
     def model_id(self) -> str:
         return self._model_id
@@ -141,9 +145,12 @@ def build_pipeline() -> Pipeline:
     parsing_registry = ParsingEngineRegistry()
     parsing_registry.register(config.parsing_engine, lambda: PyPDFEngine())
 
-    # Real embedding model.
+    # Real embedding model. Build it ONCE and reuse the same instance for every
+    # chunk (the registry factory is called per-embed, so returning a cached
+    # singleton avoids reloading the model hundreds of times).
+    shared_model = SentenceTransformerModel(MODEL_NAME, MODEL_ID)
     embedding_registry = EmbeddingModelRegistry()
-    embedding_registry.register(MODEL_ID, lambda: SentenceTransformerModel(MODEL_NAME, MODEL_ID))
+    embedding_registry.register(MODEL_ID, lambda: shared_model)
 
     return Pipeline(
         config=config,
