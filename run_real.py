@@ -2,13 +2,20 @@
 
 Usage:
     python run_real.py "my-paper.pdf" "What causes heart disease?"
+    python run_real.py "my-paper.pdf"          # interactive Q&A
 
 Requirements:
-    pip install docling sentence-transformers
+    pip install pypdf sentence-transformers
+
+Notes:
+    This uses pypdf for text extraction (no OCR, no Docling). It works for any
+    PDF that has a real text layer -- which is almost every e-book, research
+    paper, and article. For SCANNED/image-only PDFs you would need OCR instead.
 """
 
 from __future__ import annotations
 
+import io
 import sys
 import time
 from typing import List, Optional
@@ -18,12 +25,65 @@ from sentence_transformers import SentenceTransformer
 from biomed_rag.config import PipelineConfig
 from biomed_rag.embedding.model import EmbeddingModel, EmbeddingTimeoutError
 from biomed_rag.embedding.registry import EmbeddingModelRegistry
-from biomed_rag.ingestion.service import Accepted, Duplicate, FileInput, Rejected
-from biomed_rag.parsing.docling_adapter import DoclingAdapter
-from biomed_rag.parsing.raw_result import SourceDocument
+from biomed_rag.ingestion.service import Accepted, FileInput, Rejected
+from biomed_rag.parsing.engine import ParseError, ParsingEngine
+from biomed_rag.parsing.raw_result import RawBlock, RawPage, RawParseResult, SourceDocument
 from biomed_rag.parsing.registry import ParsingEngineRegistry
 from biomed_rag.pipeline import Pipeline
 from biomed_rag.retrieval.retriever import QueryRequest
+
+
+# ---------------------------------------------------------------------------
+# Real PDF parsing engine using pypdf (no OCR, no Docling)
+# ---------------------------------------------------------------------------
+
+class PyPDFEngine(ParsingEngine):
+    """A simple, reliable text-layer PDF parser built on pypdf.
+
+    Extracts text page by page and emits one RawBlock per paragraph. This avoids
+    Docling and its OCR dependencies entirely, which is ideal for text PDFs.
+    """
+
+    def engine_id(self) -> str:
+        return "pypdf"
+
+    def is_available(self) -> bool:
+        try:
+            import pypdf  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    def parse(self, doc: SourceDocument, deadline: Optional[float] = None) -> RawParseResult:
+        from pypdf import PdfReader
+
+        try:
+            reader = PdfReader(io.BytesIO(doc.raw_bytes))
+        except Exception as exc:
+            raise ParseError(f"pypdf could not open the PDF: {exc}") from exc
+
+        blocks: List[RawBlock] = []
+        pages: List[RawPage] = []
+
+        for page_index, page in enumerate(reader.pages, start=1):
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+
+            has_text = bool(text.strip())
+            pages.append(RawPage(page_number=page_index, has_text_layer=has_text))
+
+            # Split the page text into paragraphs on blank lines; fall back to
+            # the whole page as one block when there are no blank-line breaks.
+            paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+            if not paragraphs and has_text:
+                paragraphs = [text.strip()]
+
+            for para in paragraphs:
+                blocks.append(RawBlock(text=para, page_number=page_index, kind="paragraph"))
+
+        return RawParseResult(engine_id="pypdf", blocks=blocks, pages=pages)
 
 
 # ---------------------------------------------------------------------------
@@ -71,21 +131,17 @@ def build_pipeline() -> Pipeline:
     """Build the pipeline with real PDF parsing + real embeddings."""
 
     config = PipelineConfig(
-        parsing_engine="docling",
+        parsing_engine="docling",  # the config key; we register pypdf under it
         embedding_model=MODEL_ID,
         embedding_dimension=DIMENSION,
         embedding_timeout_seconds=60,
     )
 
-    # Real PDF parser, with OCR DISABLED (avoids the broken RapidOCR dependency
-    # and is much faster for normal text PDFs that already have a text layer).
+    # Register our pypdf engine for the configured parsing choice.
     parsing_registry = ParsingEngineRegistry()
-    parsing_registry.register(
-        config.parsing_engine,
-        lambda: DoclingAdapter(backend=_docling_backend_no_ocr),
-    )
+    parsing_registry.register(config.parsing_engine, lambda: PyPDFEngine())
 
-    # Real embedding model
+    # Real embedding model.
     embedding_registry = EmbeddingModelRegistry()
     embedding_registry.register(MODEL_ID, lambda: SentenceTransformerModel(MODEL_NAME, MODEL_ID))
 
@@ -94,33 +150,6 @@ def build_pipeline() -> Pipeline:
         parsing_registry=parsing_registry,
         embedding_registry=embedding_registry,
     )
-
-
-def _docling_backend_no_ocr(doc: SourceDocument, deadline: Optional[float] = None):
-    """Drive Docling with OCR turned off, returning its native export dict.
-
-    Disabling OCR sidesteps the broken RapidOCR package and works for any PDF
-    that already contains a text layer (most e-books, papers, and articles).
-    If you need to read a SCANNED/image-only PDF, set do_ocr=True and fix the
-    rapidocr install instead.
-    """
-    import io
-
-    from docling.datamodel.base_models import DocumentStream, InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-
-    pipeline_options = PdfPipelineOptions()
-    pipeline_options.do_ocr = False  # <-- the key line: no OCR
-
-    converter = DocumentConverter(
-        format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-        }
-    )
-    stream = DocumentStream(name=doc.document_id, stream=io.BytesIO(doc.raw_bytes))
-    result = converter.convert(stream)
-    return result.document.export_to_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +170,7 @@ def main() -> None:
         content = f.read()
     print(f"  Size: {len(content) / 1024 / 1024:.1f} MB")
 
-    print("Building pipeline (loading models on first run)...")
+    print("Building pipeline (loading embedding model on first run)...")
     pipeline = build_pipeline()
 
     # Submit
@@ -179,7 +208,7 @@ def main() -> None:
         print("No chunks stored (document may have produced no extractable text).")
         sys.exit(1)
 
-    # Interactive query loop
+    # Query
     if query:
         _run_query(pipeline, query)
     else:
