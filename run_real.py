@@ -20,6 +20,7 @@ from biomed_rag.embedding.model import EmbeddingModel, EmbeddingTimeoutError
 from biomed_rag.embedding.registry import EmbeddingModelRegistry
 from biomed_rag.ingestion.service import Accepted, Duplicate, FileInput, Rejected
 from biomed_rag.parsing.docling_adapter import DoclingAdapter
+from biomed_rag.parsing.raw_result import SourceDocument
 from biomed_rag.parsing.registry import ParsingEngineRegistry
 from biomed_rag.pipeline import Pipeline
 from biomed_rag.retrieval.retriever import QueryRequest
@@ -76,9 +77,13 @@ def build_pipeline() -> Pipeline:
         embedding_timeout_seconds=60,
     )
 
-    # Real PDF parser
+    # Real PDF parser, with OCR DISABLED (avoids the broken RapidOCR dependency
+    # and is much faster for normal text PDFs that already have a text layer).
     parsing_registry = ParsingEngineRegistry()
-    parsing_registry.register(config.parsing_engine, lambda: DoclingAdapter())
+    parsing_registry.register(
+        config.parsing_engine,
+        lambda: DoclingAdapter(backend=_docling_backend_no_ocr),
+    )
 
     # Real embedding model
     embedding_registry = EmbeddingModelRegistry()
@@ -89,6 +94,33 @@ def build_pipeline() -> Pipeline:
         parsing_registry=parsing_registry,
         embedding_registry=embedding_registry,
     )
+
+
+def _docling_backend_no_ocr(doc: SourceDocument, deadline: Optional[float] = None):
+    """Drive Docling with OCR turned off, returning its native export dict.
+
+    Disabling OCR sidesteps the broken RapidOCR package and works for any PDF
+    that already contains a text layer (most e-books, papers, and articles).
+    If you need to read a SCANNED/image-only PDF, set do_ocr=True and fix the
+    rapidocr install instead.
+    """
+    import io
+
+    from docling.datamodel.base_models import DocumentStream, InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+
+    pipeline_options = PdfPipelineOptions()
+    pipeline_options.do_ocr = False  # <-- the key line: no OCR
+
+    converter = DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+        }
+    )
+    stream = DocumentStream(name=doc.document_id, stream=io.BytesIO(doc.raw_bytes))
+    result = converter.convert(stream)
+    return result.document.export_to_dict()
 
 
 # ---------------------------------------------------------------------------
