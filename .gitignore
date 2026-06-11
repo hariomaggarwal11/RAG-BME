@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# RAG local store
+.rag_store.pkl
+*.pkl
+
+# Hypothesis / pytest caches
+.hypothesis/
+.pytest_cache/
+
+# OS
+.DS_Store
